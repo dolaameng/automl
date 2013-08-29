@@ -11,6 +11,7 @@ import json
 from sklearn.externals import joblib
 from IPython.core.display import display
 import copy
+from functools import partial
 
 from models import *
 
@@ -51,7 +52,7 @@ def query_db(db, table, columns = '*', where = None):
     conn.close()
     return results
 
-def write_item(project_path, meta, bulk, item_type):
+def write_item(meta, bulk, item_type, project_path = None):
     """
     write data/model to the meta database and binary files
     """
@@ -70,7 +71,7 @@ def write_item(project_path, meta, bulk, item_type):
     bulk_file = path.join(bulk_folder, 'bulk.pkl')
     joblib.dump(bulk, bulk_file)
     
-def read_meta_by_name(project_path, item_name, item_type):
+def read_meta_by_name(item_name, item_type, project_path = None):
     """
     return meta informatino of item from the corresponding meta database
     """
@@ -83,7 +84,7 @@ def read_meta_by_name(project_path, item_name, item_type):
     results = query_db(item_meta_db, item_meta_table, columns='*', where = 'name = "%s"' % item_name)
     return results[0] if results else None
 
-def read_bulk_by_name(project_path, item_name, item_type):
+def read_bulk_by_name(item_name, item_type, project_path = None):
     """
     load the model/data bulk into the memory and return it
     """
@@ -174,7 +175,7 @@ def write_project(container_path, project_name):
     os.mkdir(temp_folder)
     return project_path
     
-def write_data(project_path, data_meta, data_bulk):
+def write_data(data_meta, data_bulk, project_path = None):
     """
     """
     meta = copy.deepcopy(data_meta)
@@ -182,12 +183,12 @@ def write_data(project_path, data_meta, data_bulk):
     meta['output_features'] = json.dumps(meta['output_features'])
     write_item(project_path = project_path, meta = meta, bulk = data_bulk, item_type = 'data')
     
-def write_model(project_path, model_meta, model_bulk):
+def write_model(model_meta, model_bulk, project_path = None):
     """
     """
     write_item(project_path = project_path, meta = model_meta, bulk = model_bulk, item_type = 'model')
     
-def read_data_meta(project_path, data_name):
+def read_data_meta(data_name, project_path = None):
     """
     return dictionary of data meta, as in the data/meta.db/data_meta table
     """
@@ -196,22 +197,22 @@ def read_data_meta(project_path, data_name):
     meta['output_features'] = json.loads(meta['output_features'])
     return meta
 
-def read_model_meta(project_path, model_name):
+def read_model_meta(model_name, project_path = None):
     """
     """
     return read_meta_by_name(project_path = project_path, item_name = model_name, item_type = 'model')
 
-def read_data_bulk(project_path, data_name):
+def read_data_bulk(data_name, project_path = None):
     """
     return the bulk of data as what it is saved as
     """
-    return read_bulk_by_name(project_path, data_name, 'data')
+    return read_bulk_by_name(project_path = project_path, item_name = data_name, item_type = 'data')
 
-def read_model_bulk(project_path, model_name):
+def read_model_bulk(model_name, project_path = None):
     """
     return the bulk of data as what it is saved as
     """
-    return read_bulk_by_name(project_path, model_name, 'model')
+    return read_bulk_by_name(project_path = project_path, item_name = model_name, item_type = 'model')
 
 def trainable(model_meta, data_meta):
     """
@@ -223,13 +224,13 @@ def trainable(model_meta, data_meta):
     match = (model_type & data_type > 0)
     return match
 
-def predictable(model_meta, data_meta, project_path):
+def predictable(model_meta, data_meta, project_path = None):
     """to test if model can be used to predict on data
     RULE: train_data's signature matches new_data's signature
     signature of data includes (namespace, input_feats, output_feats, type)
     """
     try:
-        train_meta = read_data_meta(project_path, model_meta['train_data'])
+        train_meta = read_data_meta(project_path = project_path, data_name = model_meta['train_data'])
     except Exception, e:
         raise e
         #raise RuntimeError('the model %s has NOT been trained on any data yet' % (model_meta['name'], ))
@@ -248,13 +249,13 @@ def predictable(model_meta, data_meta, project_path):
     compatible = namespace_match and inputs_match and type_match
     return compatible
 
-def transformable(model_meta, data_meta, project_path):
+def transformable(model_meta, data_meta, project_path = None):
     """to test if model can be used to transform on data (e.g. feature extractor/selector)
     RULE: train_data's signature matches new_data's signature
     signature of data includes (namespace, input_feats, output_feats, type)
     """
     try:
-        train_meta = read_data_meta(project_path, model_meta['train_data'])
+        train_meta = read_data_meta(project_path = project_path, data_name = model_meta['train_data'])
     except Exception, e:
         raise e
         #raise RuntimeError('the model %s has NOT been trained on any data yet' % (model_meta['name'], ))
@@ -282,7 +283,7 @@ def train_meta_on(model_meta, data_meta, trained_model_name):
     trained_model_meta.update({'name': trained_model_name, 'train_data': train_data})
     return trained_model_meta
     
-def train_on(project_path, model_name, data_name, trained_model_name):
+def train_on(model_name, data_name, trained_model_name, project_path = None):
     """
     STEPS:
     1. load model_meta and data_meta if type DOESNT match, raise Exception
@@ -291,13 +292,13 @@ def train_on(project_path, model_name, data_name, trained_model_name):
     4. generate the newmodel and save it by trained_model_name
     """
     ## test if model is trainable on data
-    model_meta = read_model_meta(project_path, model_name)
-    data_meta = read_data_meta(project_path, data_name)
+    model_meta = read_model_meta(project_path = project_path, model_name = model_name)
+    data_meta = read_data_meta(project_path = project_path, data_name = data_name)
     if not trainable(model_meta, data_meta):
         raise RuntimeError("model %s is not trainable on dataset %s" % (model_name, data_name))
     ## load into memory
-    model_bulk = read_model_bulk(project_path, model_name)
-    data_bulk = read_data_bulk(project_path, data_name)
+    model_bulk = read_model_bulk(project_path = project_path, model_name = model_name)
+    data_bulk = read_data_bulk(project_path = project_path, data_name = data_name)
     ## call model.fit(data)
     input_feats = data_meta['input_features']
     output_feats = data_meta['output_features']
@@ -308,9 +309,9 @@ def train_on(project_path, model_name, data_name, trained_model_name):
     model_bulk.fit(data_input, data_output)
     ## generate new model
     trained_model_meta = train_meta_on(model_meta, data_meta, trained_model_name)
-    write_model(project_path, trained_model_meta, model_bulk)
+    write_model(project_path = project_path, model_meta = trained_model_meta, model_bulk = model_bulk)
     
-def predict_on(project_path, model_name, data_name, predicted_data_name):
+def predict_on(model_name, data_name, predicted_data_name, project_path = None):
     """
     STEP:
     1. trace model train_data's meta
@@ -318,14 +319,14 @@ def predict_on(project_path, model_name, data_name, predicted_data_name):
     3. signature defined as namespace/namespace1
     """
     ## read meta information
-    model_meta = read_model_meta(project_path, model_name)
-    model_train_meta = read_data_meta(project_path, model_meta['train_data'])
-    data_meta = read_data_meta(project_path, data_name)
+    model_meta = read_model_meta(project_path = project_path, model_name = model_name)
+    model_train_meta = read_data_meta(project_path = project_path, data_name = model_meta['train_data'])
+    data_meta = read_data_meta(project_path = project_path, data_name = data_name)
     if not predictable(model_meta, data_meta, project_path):
         raise RuntimeError("model %s cannot predict on data %s" % (model_name, data_name))
     ## load the data and trained model into memory
-    model_bulk = read_model_bulk(project_path, model_name)
-    data_bulk = read_data_bulk(project_path, data_name)
+    model_bulk = read_model_bulk(project_path = project_path, model_name = model_name)
+    data_bulk = read_data_bulk(project_path = project_path, data_name = data_name)
     input_features = model_train_meta['input_features']
     output_features = model_train_meta['output_features']
     ## fit the data into the shape of model's train data
@@ -337,19 +338,19 @@ def predict_on(project_path, model_name, data_name, predicted_data_name):
     predicted_data_bulk.update(yhat, join = 'left')
     predicted_data_meta = data_meta
     predicted_data_meta.update({'name': predicted_data_name, 'output_features': output_features})
-    write_data(project_path, predicted_data_meta, predicted_data_bulk)
+    write_data(project_path = project_path, data_meta = predicted_data_meta, data_bulk = predicted_data_bulk)
 
-def transform_on(project_path, model_name, data_name, transformed_data_name):
+def transform_on(model_name, data_name, transformed_data_name, project_path = None):
     """
     """
-    model_meta = read_model_meta(project_path, model_name)
-    model_train_meta = read_data_meta(project_path, model_meta['train_data'])
-    data_meta = read_data_meta(project_path, data_name)
+    model_meta = read_model_meta(project_path = project_path, model_name = model_name)
+    model_train_meta = read_data_meta(project_path = project_path, data_name = model_meta['train_data'])
+    data_meta = read_data_meta(project_path = project_path, data_name = data_name)
     if not transformable(model_meta, data_meta, project_path):
         raise RuntimeError("model %s cannot transform on data %s" % (model_name, data_name))
 
-    model_bulk = read_model_bulk(project_path, model_name)
-    data_bulk = read_data_bulk(project_path, data_name)
+    model_bulk = read_model_bulk(project_path = project_path, model_name = model_name)
+    data_bulk = read_data_bulk(project_path = project_path, data_name = data_name)
     input_features = model_train_meta['input_features']
     output_features = model_train_meta['output_features']
 
@@ -366,9 +367,9 @@ def transform_on(project_path, model_name, data_name, transformed_data_name):
     predicted_data_bulk = hglue([yhat, data_bulk.loc[:, output_features]])
     predicted_data_meta = data_meta
     predicted_data_meta.update({'name': transformed_data_name, 'input_features': transformed_features})
-    write_data(project_path, predicted_data_meta, predicted_data_bulk)
+    write_data(project_path = project_path, data_meta = predicted_data_meta, data_bulk = predicted_data_bulk)
 
-def score_on(project_path, target_data_name, predicted_data_name, score_fn):
+def score_on(target_data_name, predicted_data_name, score_fn, project_path = None):
     """
     the target_data and predicted_data should have the common set of output feature
     the method will compare the output features and output and apply score_fn on them
@@ -376,19 +377,33 @@ def score_on(project_path, target_data_name, predicted_data_name, score_fn):
     TODO: consider the type of data to test if the certain score_fn is appliable to them
     """
     ## read meta
-    target_meta = read_data_meta(project_path, target_data_name)
-    predicted_meta = read_data_meta(project_path, predicted_data_name)
+    target_meta = read_data_meta(project_path = project_path, data_name = target_data_name)
+    predicted_meta = read_data_meta(project_path = project_path, data_name = predicted_data_name)
     assert target_meta['output_features'] == predicted_meta['output_features'] 
     output_features = target_meta['output_features']
     ## read bulk
-    y = np.asarray(read_data_bulk(project_path, target_data_name).loc[:, output_features])
-    yhat = np.asarray(read_data_bulk(project_path, predicted_data_name).loc[:, output_features])
+    y = np.asarray(read_data_bulk(project_path = project_path, data_name = target_data_name).loc[:, output_features])
+    yhat = np.asarray(read_data_bulk(project_path = project_path, data_name = predicted_data_name).loc[:, output_features])
     ## apply scorefn 
     return score_fn(y, yhat)
 
 
 
 ## pipes
+
+def bind_project_path(fn, project_path):
+    return partial(fn, project_path = project_path)
+
+def make_pipe(fn, model_name):
+    """
+    fn : (model_name, in_data_or_model_name, out_data_or_model_name)
+    """
+    def _fn(pipe_in, pipe_out):
+        fn(project_path, model_name, pipe_in, pipe_out)
+    return _fn
+
+
+
 def pipe_model2model(train_fn, predict_fn, trained_model_name = None):
     """
     train_fn:    (project_path, in_model_name, data_name, out_model_name)
@@ -407,6 +422,6 @@ def pipe_model2model(train_fn, predict_fn, trained_model_name = None):
         real_trained_model_name = trained_model_name or "%s_TRAINED_ON_%s" % (model_name, train_data_name)
         #train_fn(project_path = project_path, model_name = model_name, data_name = train_data_name, trained_model_name = real_trained_model_name)
         #return predict_fn(project_path = project_path, model_name = real_trained_model_name, data_name = test_data_name, predicted_data_name = predicted_data_name)
-        train_fn(project_path, model_name, train_data_name, real_trained_model_name)
-        return predict_fn(project_path, real_trained_model_name, test_data_name, predicted_data_name)
+        train_fn(model_name, train_data_name, real_trained_model_name, project_path)
+        return predict_fn(real_trained_model_name, test_data_name, predicted_data_name, project_path)
     return train_predict_fn

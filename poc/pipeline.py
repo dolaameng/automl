@@ -405,6 +405,8 @@ def pipe_model2model(train_fn, predict_fn, trained_model_name = None):
         ## write data
         ## bypass closure immutable ref limitation
         real_trained_model_name = trained_model_name or "%s_TRAINED_ON_%s" % (model_name, train_data_name)
-        train_fn(project_path = project_path, model_name = model_name, data_name = train_data_name, trained_model_name = real_trained_model_name)
-        return predict_fn(project_path = project_path, model_name = real_trained_model_name, data_name = test_data_name, predicted_data_name = predicted_data_name)
+        #train_fn(project_path = project_path, model_name = model_name, data_name = train_data_name, trained_model_name = real_trained_model_name)
+        #return predict_fn(project_path = project_path, model_name = real_trained_model_name, data_name = test_data_name, predicted_data_name = predicted_data_name)
+        train_fn(project_path, model_name, train_data_name, real_trained_model_name)
+        return predict_fn(project_path, real_trained_model_name, test_data_name, predicted_data_name)
     return train_predict_fn

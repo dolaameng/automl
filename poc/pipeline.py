@@ -392,13 +392,22 @@ def score_on(target_data_name, predicted_data_name, score_fn, project_path = Non
 
 ## pipes
 def make_pipeline():
-    return nx.DiGraph()
+    pipeline = nx.DiGraph()
+    pipeline.max_id = 0 ## infinite source of id
+    return pipeline
 
-def make_pipe(fn, ins, outs, pipeline):
-    pipe_name = fn.__name__
-    pipe_config = {'args': inspect.getargspec(fn).args, 'ins': ins, 'outs': outs}
+def make_pipe(pipeline, fn, ins, outs):
+    pipe_name = pipeline.max_id
+    pipeline.max_id += 1 
+    pipe_config = {'fn': fn, 'args': inspect.getargspec(fn).args, 
+                    'ins': ins, 'outs': outs, 
+                    'in_bindings': [], 'out_bindings': []}
     pipeline.add_node(pipe_name, pipe_config)
-    return pipeline.nodes(data = True)[-1]
+    return pipe_name
+
+def connect_pipe(pipeline, from, from_out, to, to_in):
+    pipeline.add_edge(from, to)
+    ??
 
 def bind_input(input_index, pipe):
     pass

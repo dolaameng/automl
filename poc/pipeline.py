@@ -15,7 +15,7 @@ import copy
 from models import *
 
 ## LOWER IO HELPER FUNCTIONS
-def insert_to_db(db, table, row):
+def overwrite_to_db(db, table, row):
     """
     db: sqlite3 datafile path
     tablename: table in the database
@@ -23,12 +23,16 @@ def insert_to_db(db, table, row):
     """
     conn = sqlite3.connect(db)
     c = conn.cursor()
-    statement = """INSERT INTO %s (%s) VALUES (%s)""" % (table, 
+    ## name is unique id in both data and model db
+    #update_statement = "UPDATE %s SET %s WHERE name='%s'" % (table, ','.join(['%s=%s' % (k,v) for k,v in row.items()]), row['name'])
+    delete_statement = "DELETE FROM %s WHERE name='%s'" % (table, row['name'])
+    insert_statement = """INSERT INTO %s (%s) VALUES (%s)""" % (table, 
                                                          ','.join(row.keys()), 
                                                          ','.join(["'%s'" % (s,) for s in row.values()]))
 
-    #print statement
-    c.execute(statement)
+
+    c.execute(delete_statement) ## not ideal but fast enough for prototyping
+    c.execute(insert_statement)
     conn.commit()
     conn.close()
     
@@ -57,9 +61,11 @@ def write_item(project_path, meta, bulk, item_type):
     item_meta_db = get_config(prefix+'meta_db', project_path)
     item_meta_table = get_config(prefix+'meta_table', project_path)
     ## insert meta information to meta.db
-    insert_to_db(db = item_meta_db, table = item_meta_table, row = meta)
+    overwrite_to_db(db = item_meta_db, table = item_meta_table, row = meta)
     ## save data_bulk into database
     bulk_folder = path.join(item_folder, meta['name'])
+    if path.exists(bulk_folder):
+        shutil.rmtree(bulk_folder)
     os.mkdir(bulk_folder)
     bulk_file = path.join(bulk_folder, 'bulk.pkl')
     joblib.dump(bulk, bulk_file)
@@ -101,11 +107,11 @@ def get_config(item, project_path = None):
               , 'temp_folder': path.abspath(path.join(project_path, 'temp'))
               , 'data_meta_db': path.abspath(path.join(project_path, 'data/meta.db'))
               , 'data_meta_table': 'data_meta'
-              , 'data_meta_schema': """(name text, namespace text, input_features text, 
+              , 'data_meta_schema': """(name text PRIMARY KEY, namespace text, input_features text, 
                                       output_features text, type integer)"""
               , 'model_meta_db': path.abspath(path.join(project_path, 'models/meta.db'))
               , 'model_meta_table': 'model_meta'
-              , 'model_meta_schema': '(name text, type integer, train_data type)'
+              , 'model_meta_schema': '(name text PRIMARY KEY, type integer, train_data type)'
               , 'data_signature_template': ('namespace', 'input_features', 'output_features', 'type')}
     return CONFIG[item]
 
@@ -242,6 +248,31 @@ def predictable(model_meta, data_meta, project_path):
     compatible = namespace_match and inputs_match and type_match
     return compatible
 
+def transformable(model_meta, data_meta, project_path):
+    """to test if model can be used to transform on data (e.g. feature extractor/selector)
+    RULE: train_data's signature matches new_data's signature
+    signature of data includes (namespace, input_feats, output_feats, type)
+    """
+    try:
+        train_meta = read_data_meta(project_path, model_meta['train_data'])
+    except Exception, e:
+        raise e
+        #raise RuntimeError('the model %s has NOT been trained on any data yet' % (model_meta['name'], ))
+    signature_template = get_config('data_signature_template')
+    train_sig = {sig:train_meta[sig] for sig in signature_template}
+    data_sig = {sig:data_meta[sig] for sig in signature_template}
+    ## rules to decide if data_sig is compatible with a model trained on data_sig
+    ## data.namespace == train.namespace
+    ## data.input_features >= train.input_features
+    ## data.output_features == train.output_features - NO NEED FOR PREDICTION AT ALL
+    ## data.type == train.type
+    namespace_match = data_sig['namespace'] == train_sig['namespace']
+    inputs_match = set(data_sig['input_features']).issuperset(set(train_sig['input_features']))
+    #outputs_match = set(data_sig['output_features']) == set(train_sig['output_features'])
+    type_match = data_sig['type'] == train_sig['type']
+    compatible = namespace_match and inputs_match and type_match
+    return compatible
+
 def train_meta_on(model_meta, data_meta, trained_model_name):
     """
     create and return trained_model_meta based on the previous model meta and data meta
@@ -308,6 +339,35 @@ def predict_on(project_path, model_name, data_name, predicted_data_name):
     predicted_data_meta.update({'name': predicted_data_name, 'output_features': output_features})
     write_data(project_path, predicted_data_meta, predicted_data_bulk)
 
+def transform_on(project_path, model_name, data_name, transformed_data_name):
+    """
+    """
+    model_meta = read_model_meta(project_path, model_name)
+    model_train_meta = read_data_meta(project_path, model_meta['train_data'])
+    data_meta = read_data_meta(project_path, data_name)
+    if not transformable(model_meta, data_meta, project_path):
+        raise RuntimeError("model %s cannot transform on data %s" % (model_name, data_name))
+
+    model_bulk = read_model_bulk(project_path, model_name)
+    data_bulk = read_data_bulk(project_path, data_name)
+    input_features = model_train_meta['input_features']
+    output_features = model_train_meta['output_features']
+
+    X = np.asarray(data_bulk.loc[:, input_features])
+    yhat = model_bulk.transform(X)
+    ## combine yhat with original data
+    n_ycols = yhat.shape[1]
+    transformed_features = ['%s_%i' % (model_name, i) for i in xrange(n_ycols)]
+    yhat = pd.DataFrame(yhat, columns = transformed_features)
+    predicted_data_bulk = data_bulk
+    #predicted_data_bulk.update(yhat, join = 'left')
+    #predicted_data_bulk = hglue([data_bulk, yhat])
+    ## excluding original input features
+    predicted_data_bulk = hglue([yhat, data_bulk.loc[:, output_features]])
+    predicted_data_meta = data_meta
+    predicted_data_meta.update({'name': transformed_data_name, 'input_features': transformed_features})
+    write_data(project_path, predicted_data_meta, predicted_data_bulk)
+
 def score_on(project_path, target_data_name, predicted_data_name, score_fn):
     """
     the target_data and predicted_data should have the common set of output feature
@@ -333,7 +393,8 @@ def pipe_model2model(train_fn, predict_fn, trained_model_name = None):
     """
     train_fn:    (project_path, in_model_name, data_name, out_model_name)
     predict_fn:  (project_path, model_name, in_data_name, out_data_name)
-    trained_model_name: if to save the model on system, provide the file name here, otherwise it will be a temprary model name 
+    trained_model_name: if to save the model on system, provide the file name here, otherwise it will be auto-generated by nameing convention
+        model_trained_on_data
     connection:   train_fn.out_model_name == predict_fn.model_name 
     RETURN train_predict_fn
     train_predict_fn: (project_path, model_name, train_data_name, test_data_name, predicted_data_name)
@@ -342,5 +403,8 @@ def pipe_model2model(train_fn, predict_fn, trained_model_name = None):
         ## train model -> temparal file
         ## use temparal file -> predict model
         ## write data
-        ??
+        ## bypass closure immutable ref limitation
+        real_trained_model_name = trained_model_name or "%s_TRAINED_ON_%s" % (model_name, train_data_name)
+        train_fn(project_path = project_path, model_name = model_name, data_name = train_data_name, trained_model_name = real_trained_model_name)
+        return predict_fn(project_path = project_path, model_name = real_trained_model_name, data_name = test_data_name, predicted_data_name = predicted_data_name)
     return train_predict_fn

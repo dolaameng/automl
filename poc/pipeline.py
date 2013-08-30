@@ -1,7 +1,3 @@
-from sklearn import preprocessing
-from sklearn import linear_model
-from sklearn import datasets
-from sklearn import metrics
 import numpy as np
 import pandas as pd
 import shutil, os
@@ -10,14 +6,16 @@ import sqlite3
 import json
 from sklearn.externals import joblib
 from IPython.core.display import display
-import copy
+import copy as cp
 from functools import partial
 import networkx as nx
 import inspect
+from sklearn import grid_search
+from collections import defaultdict
 
 from models import *
 
-## LOWER IO HELPER FUNCTIONS
+## low IO api, helper function
 def overwrite_to_db(db, table, row):
     """
     db: sqlite3 datafile path
@@ -97,7 +95,7 @@ def read_bulk_by_name(item_name, item_type, project_path = None):
     item = joblib.load(item_file)
     return item
 
-def hglue(dfs):
+def hglue(*dfs):
     """horizontally stack all the df in dfs
     example: xy_df = hglue([X, y]) 
     """
@@ -143,6 +141,8 @@ class ModelType(object):
     SUBSAMPLER = (DataType.UNSUPERVISED + DataType.BINARY_CLASSIFICATION 
                          + DataType.MULTI_CLASSIFICATION + DataType.REGRESSION)
 
+## models and data
+
 def write_project(container_path, project_name):
     ## check if project exists - overwrite
     project_path = path.abspath(path.join(container_path, project_name))
@@ -176,13 +176,25 @@ def write_project(container_path, project_name):
     ## temp folder
     os.mkdir(temp_folder)
     return project_path
+
+def create_model_meta(model_name, model_type):
+    return {'name': model_name, 
+            'type': model_type}
+
+def create_data_meta(data_name, data_namespace, input_feats, output_feats, data_type):
+    return {  'name': data_name
+            , 'namespace': data_namespace
+            , 'input_features': input_feats
+            , 'output_features': output_feats
+            , 'type': data_type}
     
 def write_data(data_meta, data_bulk, project_path = None):
     """
     """
-    meta = copy.deepcopy(data_meta)
-    meta['input_features'] = json.dumps(meta['input_features'])
-    meta['output_features'] = json.dumps(meta['output_features'])
+    meta = cp.deepcopy(data_meta)
+    ## JSON can only serialize built in list
+    meta['input_features'] = json.dumps([fi for fi in meta['input_features']])
+    meta['output_features'] = json.dumps([fo for fo in meta['output_features']])
     write_item(project_path = project_path, meta = meta, bulk = data_bulk, item_type = 'data')
     
 def write_model(model_meta, model_bulk, project_path = None):
@@ -280,7 +292,7 @@ def train_meta_on(model_meta, data_meta, trained_model_name):
     """
     create and return trained_model_meta based on the previous model meta and data meta
     """
-    trained_model_meta = copy.deepcopy(model_meta)
+    trained_model_meta = cp.deepcopy(model_meta)
     train_data = data_meta['name']
     trained_model_meta.update({'name': trained_model_name, 'train_data': train_data})
     return trained_model_meta
@@ -389,48 +401,108 @@ def score_on(target_data_name, predicted_data_name, score_fn, project_path = Non
     ## apply scorefn 
     return score_fn(y, yhat)
 
+def set_params_on_model(model_name, model_params, project_path):
+    """
+    params: {param_name: param_value}
+    """
+    ## find model meta and bulk
+    model_meta = read_model_meta(model_name, project_path)
+    model_bulk = read_model_bulk(model_name, project_path)
+    ## set model params on bulk
+    ## model meta will not be changed
+    model_bulk.set_params(**model_params)
+    ## save it back
+    write_model(model_meta, model_bulk, project_path)
 
-## pipes
-def make_pipeline():
+## pipeline 
+
+def make_pipeline(pipeline_name):
     pipeline = nx.DiGraph()
-    pipeline.max_id = 0 ## infinite source of id
+    pipeline.name = pipeline_name
+    #pipeline.max_id = 0 ## infinite source of id
     return pipeline
 
-def make_pipe(pipeline, fn, ins, outs):
-    pipe_name = pipeline.max_id
-    pipeline.max_id += 1 
-    pipe_config = {'fn': fn, 'args': inspect.getargspec(fn).args, 
-                    'ins': ins, 'outs': outs, 
-                    'in_bindings': [], 'out_bindings': []}
+def make_pipe(fn, pipeline, pipe_name):
+    #pipe_id = pipeline.max_id
+    #pipeline.max_id += 1 
+    arg_names = inspect.getargspec(fn).args
+    pipe_config = {'name': pipe_name, 'fn': fn, 'args': arg_names, 
+                    'bindings': {k:None for k in arg_names}}
     pipeline.add_node(pipe_name, pipe_config)
     return pipe_name
 
-def connect_pipe(pipeline, from, from_out, to, to_in):
-    pipeline.add_edge(from, to)
-    ??
+def connect_pipes(from_id, out_arg, to_id, in_arg, pipeline):
+    pipeline.add_edge(from_id, to_id)
+    from_node = pipeline.node[from_id]
+    to_node = pipeline.node[to_id]
+    #assert from_node['bindings'][out_arg] is None
+    #assert to_node['bindings'][in_arg] is None
+    #common_item = '%s_(%s_TO_%s)' % (pipeline.name, from_node['name'], to_node['name'])
+    ## because one output might flow into multiple inputs of different nodes
+    common_item = '%s_(%s_OUT)' % (pipeline.name, from_node['name'])
+    from_node['bindings'][out_arg] = common_item
+    to_node['bindings'][in_arg] = common_item
+    return pipeline
 
-def bind_input(input_index, pipe):
-    pass
+def bind_args(args, values, pipe_id, pipeline):
+    pipe_node = pipeline.node[pipe_id]
+    for arg, value in zip(args, values):
+        assert pipe_node['bindings'][arg] is None
+        pipe_node['bindings'][arg] = value
+        
+def run_pipeline(pipeline):
+    for pipe_id in nx.topological_sort(pipeline):
+        pipe_node = pipeline.node[pipe_id]
+        fn = pipe_node['fn']
+        bindings = pipe_node['bindings']
+        fn(**bindings)
 
-def bind_output(output_index, pipe):
-    pass
+def runnable_pipeline(pipeline):
+    def _pipeline():
+        run_pipeline(pipeline)
+    return _pipeline
 
-"""
-## wishful thinking for pipeline execution
-## scenario 1 pipe connected pipe to pipeline
-train_pipe = make_pipe(nin = 2, nout = 1, g)
-predict_pipe = make_pipe(nin = 2, nout = 1, g)
-train_pipe.in[0] = train_file # bind_in(train_pipe, 0, train_file, g)
-train.pipe.in[1] = train_model_template
-predict_pipe.in[0] = test_file
-predict.pipe.in[1] = trian_pipe.out[0]
+def inspect_pipeline(pipeline):
+    figure(figsize=(12, 12))
+    layout = nx.graphviz_layout(pipeline)
+    nx.draw(pipeline, pos = layout)
 
-pipeline.add(train_pipe)
-pipeline.add(predict.pipe)
-pipeline.run()
+## parameter optimization
 
-## scenario 2 pipe connected_to pipeline
-pca_pipe = make_pipe(nin = 1, nout = 1)
-pca_pipe.in[0] = train_file
-pca_pipe.out[0] = pipeline.in[0] # ??  
-"""
+def random_param_optimize(models2params, n_iter, fn0, scorefn0, project_path):
+    """
+    models2params: {modelname: {paramname: paramvalue, ...}, ...}
+    n_iter: number of tries
+    fn = zero_arg function that runs and uses models or datafiles, 
+        e.g., partial(train_on), runnable_pipeline instance and etc.
+    scorefn0: zero_arg function that tells how good the performance of each run is, 
+        e.g., partial(score_on, metric.XXX) 
+    RETURN: [(setting1, score1), ...], setting = {(model_name, param_name): param_value}
+    """
+    ## group parameters
+    flat_params = {}
+    for model_name, params in models2params.items():
+        for param_name,  param_values in params.items():
+            flat_param_name = (model_name, param_name)
+            flat_params[flat_param_name] = param_values
+    ## sampling parameter space
+    param_sampler = grid_search.ParameterSampler(flat_params, n_iter)
+
+    results = []
+    ## iterate each param setting
+    for setting in param_sampler:
+        ## get params for each model
+        models2settings = defaultdict(dict) 
+        for (model_name, param_name), param_value in setting.items():
+            models2settings[model_name][param_name] = param_value
+        ## set params on each model
+        for model_name, params in models2settings.items():
+            set_params_on_model(model_name, params, project_path)
+        ## run fn 
+        fn0() 
+        ## record score 
+        score = scorefn0()
+        results.append((setting, score)) 
+    ## sort the results based on score:
+    results = sorted(results, key = lambda (setting, score): score, reverse = True)
+    return results 
